@@ -25,7 +25,6 @@
 <div id="status"></div>
 <div id="audioStreams"></div>
 <div class="watermark" id="version">Version: 1</div>
-
 <script>
   const createBtn = document.getElementById('createBtn');
   const joinBtn = document.getElementById('joinBtn');
@@ -34,13 +33,16 @@
   const joinRoomBtn = document.getElementById('joinRoomBtn');
   const statusDiv = document.getElementById('status');
   const audioStreamsDiv = document.getElementById('audioStreams');
+  document.getElementById("version").textContent = "Version: 2";
 
   let ws, roomCode, userId;
   let audioContext;
   const peerStreams = new Map();
 
-  function logStatus(msg) {
+  function logStatus(msg, isError = false) {
     statusDiv.textContent = msg;
+    if (isError) console.error("[VC ERROR]", msg);
+    else console.log("[VC LOG]", msg);
   }
 
   function genRoomCode() {
@@ -67,40 +69,48 @@
 
   async function startConnection(room) {
     userId = Math.random().toString(36).slice(2, 10);
-    ws = new WebSocket(`ws://${location.hostname}:8080`);
-    ws.binaryType = 'arraybuffer';
+    try {
+      ws = new WebSocket(`ws://${location.hostname}:8080`);
+      ws.binaryType = 'arraybuffer';
 
-    ws.onopen = () => {
-      ws.send(JSON.stringify({ type: 'join', room, userId }));
-      logStatus('Connected to server. Getting mic access...');
-      startAudioCapture();
-    };
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ type: 'join', room, userId }));
+        logStatus('Connected to server. Getting mic access...');
+        startAudioCapture();
+      };
 
-    ws.onmessage = async (msg) => {
-      if (typeof msg.data === 'string') {
-        const data = JSON.parse(msg.data);
-        if (data.type === 'user-joined') {
-          logStatus(`User ${data.userId} joined room.`);
-        } else if (data.type === 'user-left') {
-          logStatus(`User ${data.userId} left room.`);
-          removeAudioStream(data.userId);
+      ws.onmessage = async (msg) => {
+        try {
+          if (typeof msg.data === 'string') {
+            const data = JSON.parse(msg.data);
+            if (data.type === 'user-joined') {
+              logStatus(`User ${data.userId} joined room.`);
+            } else if (data.type === 'user-left') {
+              logStatus(`User ${data.userId} left room.`);
+              removeAudioStream(data.userId);
+            }
+          } else {
+            // Binary data: audio stream from another user
+            const buffer = await decodeAudioData(msg.data);
+            playAudioStream(buffer, msg.data.userId);
+          }
+        } catch (e) {
+          logStatus(`Error handling message: ${e.message}`, true);
         }
-      } else {
-        // Binary data: audio stream from another user
-        const buffer = await decodeAudioData(msg.data);
-        playAudioStream(buffer, msg.data.userId);
-      }
-    };
+      };
 
-    ws.onclose = () => {
-      logStatus('Disconnected from server.');
-      cleanup();
-    };
+      ws.onclose = () => {
+        logStatus('Disconnected from server.');
+        cleanup();
+      };
 
-    ws.onerror = (e) => {
-      console.error('WebSocket error:', e);
-      logStatus('WebSocket error occurred.');
-    };
+      ws.onerror = (e) => {
+        logStatus('WebSocket error occurred.', true);
+        console.error(e);
+      };
+    } catch (e) {
+      logStatus(`WebSocket connection failed: ${e.message}`, true);
+    }
   }
 
   function cleanup() {
@@ -120,66 +130,85 @@
       processor.connect(audioContext.destination);
 
       processor.onaudioprocess = (e) => {
-        const input = e.inputBuffer.getChannelData(0);
-        // Convert Float32Array to Int16 PCM
-        const int16Buffer = new Int16Array(input.length);
-        for (let i = 0; i < input.length; i++) {
-          int16Buffer[i] = input[i] * 0x7FFF;
-        }
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          // Send raw PCM + userId header as binary
-          const header = new TextEncoder().encode(userId + ':');
-          const combined = new Uint8Array(header.length + int16Buffer.byteLength);
-          combined.set(header, 0);
-          combined.set(new Uint8Array(int16Buffer.buffer), header.length);
-          ws.send(combined.buffer);
+        try {
+          const input = e.inputBuffer.getChannelData(0);
+          const int16Buffer = new Int16Array(input.length);
+          for (let i = 0; i < input.length; i++) {
+            int16Buffer[i] = input[i] * 0x7FFF;
+          }
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            const header = new TextEncoder().encode(userId + ':');
+            const combined = new Uint8Array(header.length + int16Buffer.byteLength);
+            combined.set(header, 0);
+            combined.set(new Uint8Array(int16Buffer.buffer), header.length);
+            ws.send(combined.buffer);
+          }
+        } catch (err) {
+          logStatus(`Audio capture error: ${err.message}`, true);
         }
       };
 
       logStatus('Mic access granted, streaming audio...');
     } catch (e) {
-      logStatus('Mic access denied or error occurred.');
+      logStatus('Mic access denied or error occurred.', true);
+      console.error(e);
     }
   }
 
   async function decodeAudioData(arrayBuffer) {
-    if (!audioContext) audioContext = new AudioContext();
-    // skip userId header for playback, expecting userId + ':'
-    // but here just decode entire buffer as PCM, so a simple decode
-    return audioContext.decodeAudioData(arrayBuffer).catch(() => null);
+    try {
+      if (!audioContext) audioContext = new AudioContext();
+      return audioContext.decodeAudioData(arrayBuffer);
+    } catch (e) {
+      logStatus(`Audio decoding failed: ${e.message}`, true);
+      return null;
+    }
   }
 
   function playAudioStream(buffer, fromUserId) {
     if (!buffer) return;
-    if (peerStreams.has(fromUserId)) {
-      // update existing source
-      const audio = peerStreams.get(fromUserId);
-      // ... for simplicity we just play multiple streams
-      audio.src = URL.createObjectURL(new Blob([buffer]));
-      audio.play();
-    } else {
-      // create new audio element
-      const audio = new Audio();
-      audio.autoplay = true;
-      audio.controls = true;
-      audio.src = URL.createObjectURL(new Blob([buffer]));
-      const container = document.createElement('div');
-      container.className = 'audio-container';
-      container.textContent = `User ${fromUserId}: `;
-      container.appendChild(audio);
-      audioStreamsDiv.appendChild(container);
-      peerStreams.set(fromUserId, audio);
+    try {
+      if (peerStreams.has(fromUserId)) {
+        const audio = peerStreams.get(fromUserId);
+        audio.src = URL.createObjectURL(new Blob([buffer]));
+        audio.play();
+      } else {
+        const audio = new Audio();
+        audio.autoplay = true;
+        audio.controls = true;
+        audio.src = URL.createObjectURL(new Blob([buffer]));
+        const container = document.createElement('div');
+        container.className = 'audio-container';
+        container.textContent = `User ${fromUserId}: `;
+        container.appendChild(audio);
+        audioStreamsDiv.appendChild(container);
+        peerStreams.set(fromUserId, audio);
+      }
+    } catch (e) {
+      logStatus(`Playback error: ${e.message}`, true);
     }
   }
 
   function removeAudioStream(userId) {
-    if (peerStreams.has(userId)) {
-      const audio = peerStreams.get(userId);
-      audio.pause();
-      audio.remove();
-      peerStreams.delete(userId);
+    try {
+      if (peerStreams.has(userId)) {
+        const audio = peerStreams.get(userId);
+        audio.pause();
+        audio.remove();
+        peerStreams.delete(userId);
+      }
+    } catch (e) {
+      logStatus(`Error removing user stream: ${e.message}`, true);
     }
   }
+
+  // === Global Error Catching ===
+  window.addEventListener('error', (event) => {
+    logStatus(`Global error: ${event.message}`, true);
+  });
+
+  window.addEventListener('unhandledrejection', (event) => {
+    logStatus(`Unhandled promise rejection: ${event.reason}`, true);
+  });
 </script>
-</body>
-</html>
+
