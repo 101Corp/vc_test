@@ -165,29 +165,36 @@
     }
   }
 
-  function playAudioStream(buffer, fromUserId) {
-    if (!buffer) return;
-    try {
-      if (peerStreams.has(fromUserId)) {
-        const audio = peerStreams.get(fromUserId);
-        audio.src = URL.createObjectURL(new Blob([buffer]));
-        audio.play();
-      } else {
-        const audio = new Audio();
-        audio.autoplay = true;
-        audio.controls = true;
-        audio.src = URL.createObjectURL(new Blob([buffer]));
-        const container = document.createElement('div');
-        container.className = 'audio-container';
-        container.textContent = `User ${fromUserId}: `;
-        container.appendChild(audio);
-        audioStreamsDiv.appendChild(container);
-        peerStreams.set(fromUserId, audio);
-      }
-    } catch (e) {
-      logStatus(`Playback error: ${e.message}`, true);
+  function playAudioStream(arrayBuffer, fromUserId) {
+  try {
+    if (!audioContext) audioContext = new AudioContext();
+
+    const int16 = new Int16Array(arrayBuffer);
+    const float32 = new Float32Array(int16.length);
+    for (let i = 0; i < int16.length; i++) {
+      float32[i] = int16[i] / 0x7FFF;
     }
+
+    const buffer = audioContext.createBuffer(1, float32.length, audioContext.sampleRate);
+    buffer.getChannelData(0).set(float32);
+
+    const source = audioContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioContext.destination);
+    source.start();
+
+    if (!peerStreams.has(fromUserId)) {
+      const container = document.createElement('div');
+      container.className = 'audio-container';
+      container.textContent = `User ${fromUserId}: streaming...`;
+      audioStreamsDiv.appendChild(container);
+      peerStreams.set(fromUserId, container);
+    }
+  } catch (e) {
+    logStatus(`Playback error: ${e.message}`, true);
   }
+}
+
 
   function removeAudioStream(userId) {
     try {
