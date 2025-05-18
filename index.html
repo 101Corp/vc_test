@@ -71,11 +71,22 @@
       });
 
       socket.on("answer", async ({ from, answer }) => {
-        console.log("Received answer from", from);
-        const pc = peerConnections[from];
-        if (!pc) return;
-        await pc.setRemoteDescription(new RTCSessionDescription(answer));
-      });
+  try {
+    const pc = peerConnections[from];
+    if (!pc) return;
+
+    // Only set remote description if signalingState is not stable
+    if (pc.signalingState !== "stable") {
+      await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      console.log(`Set remote answer from ${from}`);
+    } else {
+      console.warn(`Skipped setting remote answer from ${from} because signalingState is stable`);
+    }
+  } catch (err) {
+    console.error("Error setting remote answer:", err);
+  }
+});
+
 
       socket.on("ice-candidate", ({ from, candidate }) => {
         console.log("Received ICE candidate from", from);
