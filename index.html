@@ -70,7 +70,7 @@
   async function startConnection(room) {
     userId = Math.random().toString(36).slice(2, 10);
     try {
-      ws = new WebSocket(`ws://${location.hostname}:8080`);
+      ws = new WebSocket(`wss://${location.hostname}:8080`);
       ws.binaryType = 'arraybuffer';
 
       ws.onopen = () => {
