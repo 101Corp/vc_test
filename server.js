@@ -1,73 +1,61 @@
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
+const WebSocket = require('ws');
 
-const app = express();
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: "*"
-  }
-});
+const wss = new WebSocket.Server({ port: 8080 });
 
-const rooms = {};
+const rooms = new Map();
 
-app.use(express.static(__dirname + '/public'));
+wss.on('connection', (ws) => {
+  let currentRoom = null;
+  let userId = null;
 
-io.on('connection', socket => {
-  socket.on('create', roomCode => {
-    socket.join(roomCode);
-    socket.roomCode = roomCode;
-    rooms[roomCode] = rooms[roomCode] || [];
-    rooms[roomCode].push(socket.id);
-  });
+  ws.on('message', (message) => {
+    if (typeof message === 'string') {
+      try {
+        const data = JSON.parse(message);
+        if (data.type === 'join') {
+          currentRoom = data.room;
+          userId = data.userId;
+          if (!rooms.has(currentRoom)) rooms.set(currentRoom, new Map());
+          const roomUsers = rooms.get(currentRoom);
+          roomUsers.set(userId, ws);
 
-  socket.on('join', roomCode => {
-    socket.join(roomCode);
-    socket.roomCode = roomCode;
-    rooms[roomCode] = rooms[roomCode] || [];
-    rooms[roomCode].push(socket.id);
-  });
-
- socket.on('ready', roomCode => {
-  const peers = rooms[roomCode] || [];
-
-  // Send new user's ID to existing peers (so THEY create an offer)
-  peers.forEach(peerId => {
-    if (peerId !== socket.id) {
-      io.to(peerId).emit("user-joined", { userId: socket.id });
+          // Notify others in room of new user
+          for (const [uid, sock] of roomUsers.entries()) {
+            if (uid !== userId && sock.readyState === WebSocket.OPEN) {
+              sock.send(JSON.stringify({ type: 'user-joined', userId }));
+              ws.send(JSON.stringify({ type: 'user-joined', userId: uid })); // let new user know existing ones
+            }
+          }
+        }
+      } catch (e) {
+        console.error('Failed to parse message:', e);
+      }
+    } else {
+      // Binary audio data with userId header: send to everyone else in room
+      if (!currentRoom) return;
+      const roomUsers = rooms.get(currentRoom);
+      for (const [uid, sock] of roomUsers.entries()) {
+        if (uid !== userId && sock.readyState === WebSocket.OPEN) {
+          sock.send(message);
+        }
+      }
     }
   });
 
-  // Send existing peers' IDs to the new user (so they only respond)
-  const otherPeers = peers.filter(id => id !== socket.id);
-  if (otherPeers.length > 0) {
-    socket.emit("peers", { peers: otherPeers });
-  }
-});
-
-
-  socket.on("offer", ({ to, offer }) => {
-    io.to(to).emit("offer", { from: socket.id, offer });
-  });
-
-  socket.on("answer", ({ to, answer }) => {
-    io.to(to).emit("answer", { from: socket.id, answer });
-  });
-
-  socket.on("ice-candidate", ({ to, candidate }) => {
-    io.to(to).emit("ice-candidate", { from: socket.id, candidate });
-  });
-
-  socket.on("disconnect", () => {
-    const room = rooms[socket.roomCode];
-    if (room) {
-      rooms[socket.roomCode] = room.filter(id => id !== socket.id);
-      socket.to(socket.roomCode).emit("user-left", { userId: socket.id });
+  ws.on('close', () => {
+    if (currentRoom && userId) {
+      const roomUsers = rooms.get(currentRoom);
+      if (roomUsers) {
+        roomUsers.delete(userId);
+        for (const [uid, sock] of roomUsers.entries()) {
+          if (sock.readyState === WebSocket.OPEN) {
+            sock.send(JSON.stringify({ type: 'user-left', userId }));
+          }
+        }
+        if (roomUsers.size === 0) rooms.delete(currentRoom);
+      }
     }
   });
 });
 
-server.listen(3000, () => {
-  console.log('Voice server running on port 3000');
-});
+console.log('Voice Chat WebSocket server running on port 8080');
