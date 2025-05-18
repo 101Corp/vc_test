@@ -1,10 +1,10 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Group Voice Chat - v2</title>
+  <title>Group Voice Chat - v3</title>
 </head>
 <body>
-  <h1>Group Voice Chat (v2)</h1>
+  <h1>Group Voice Chat (v3)</h1>
 
   <input id="wssUrl" placeholder="Enter WSS URL (optional)" />
   <br><br>
@@ -81,6 +81,20 @@
         console.log("Received ICE candidate from", from);
         peerConnections[from]?.addIceCandidate(new RTCIceCandidate(candidate));
       });
+
+      socket.on("peers", async ({ peers }) => {
+  for (const userId of peers) {
+    const pc = createPeerConnection(userId);
+    peerConnections[userId] = pc;
+
+    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    socket.emit("offer", { to: userId, offer });
+  }
+});
+
 
       socket.on("user-left", ({ userId }) => {
         console.log("User left:", userId);
