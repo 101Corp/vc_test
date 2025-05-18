@@ -1,161 +1,185 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <title>Group Voice Chat - v3</title>
+<meta charset="UTF-8" />
+<title>Simple VC System v1</title>
+<style>
+  body { font-family: Arial, sans-serif; background: #222; color: #eee; text-align: center; padding: 2rem; }
+  button, input { font-size: 1.2rem; margin: 0.5rem; padding: 0.5rem 1rem; }
+  #audioStreams { margin-top: 1rem; }
+  .audio-container { margin: 0.5rem 0; }
+  .watermark { position: fixed; bottom: 5px; right: 10px; font-size: 0.8rem; color: #666; }
+</style>
 </head>
 <body>
-  <h1>Group Voice Chat (v3)</h1>
+<h1>Voice Chat System</h1>
 
-  <input id="wssUrl" placeholder="Enter WSS URL (optional)" />
-  <br><br>
-  <button onclick="createRoom()">Create</button>
-  <button onclick="joinRoom()">Join</button>
-  <input id="roomCodeInput" placeholder="Enter room code..." />
-  <p id="roomCodeDisplay"></p>
+<button id="createBtn">Create Room</button>
+<button id="joinBtn">Join Room</button>
 
-  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<div id="roomControls" style="margin-top:1rem; display:none;">
+  <input type="text" id="roomCodeInput" placeholder="Enter room code" />
+  <button id="joinRoomBtn">Join</button>
+</div>
 
-  <script>
-    let socket;
-    let peerConnections = {}; // key: socket id, value: RTCPeerConnection
-    let localStream;
-    const servers = {
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+<div id="status"></div>
+<div id="audioStreams"></div>
+<div class="watermark" id="version">Version: 1</div>
+
+<script>
+  const createBtn = document.getElementById('createBtn');
+  const joinBtn = document.getElementById('joinBtn');
+  const roomControls = document.getElementById('roomControls');
+  const roomCodeInput = document.getElementById('roomCodeInput');
+  const joinRoomBtn = document.getElementById('joinRoomBtn');
+  const statusDiv = document.getElementById('status');
+  const audioStreamsDiv = document.getElementById('audioStreams');
+
+  let ws, roomCode, userId;
+  let audioContext;
+  const peerStreams = new Map();
+
+  function logStatus(msg) {
+    statusDiv.textContent = msg;
+  }
+
+  function genRoomCode() {
+    return Math.random().toString(36).slice(2, 8).toUpperCase();
+  }
+
+  createBtn.onclick = () => {
+    roomCode = genRoomCode();
+    logStatus(`Room created! Code: ${roomCode}. Waiting for others...`);
+    startConnection(roomCode);
+  };
+
+  joinBtn.onclick = () => {
+    roomControls.style.display = 'block';
+  };
+
+  joinRoomBtn.onclick = () => {
+    const code = roomCodeInput.value.trim().toUpperCase();
+    if (!code) return alert('Enter a valid room code.');
+    roomCode = code;
+    logStatus(`Joining room ${roomCode}...`);
+    startConnection(roomCode);
+  };
+
+  async function startConnection(room) {
+    userId = Math.random().toString(36).slice(2, 10);
+    ws = new WebSocket(`ws://${location.hostname}:8080`);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: 'join', room, userId }));
+      logStatus('Connected to server. Getting mic access...');
+      startAudioCapture();
     };
 
-    async function getMedia() {
-      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      console.log("Got local media stream");
+    ws.onmessage = async (msg) => {
+      if (typeof msg.data === 'string') {
+        const data = JSON.parse(msg.data);
+        if (data.type === 'user-joined') {
+          logStatus(`User ${data.userId} joined room.`);
+        } else if (data.type === 'user-left') {
+          logStatus(`User ${data.userId} left room.`);
+          removeAudioStream(data.userId);
+        }
+      } else {
+        // Binary data: audio stream from another user
+        const buffer = await decodeAudioData(msg.data);
+        playAudioStream(buffer, msg.data.userId);
+      }
+    };
+
+    ws.onclose = () => {
+      logStatus('Disconnected from server.');
+      cleanup();
+    };
+
+    ws.onerror = (e) => {
+      console.error('WebSocket error:', e);
+      logStatus('WebSocket error occurred.');
+    };
+  }
+
+  function cleanup() {
+    if (audioContext) audioContext.close();
+    audioStreamsDiv.innerHTML = '';
+    peerStreams.clear();
+  }
+
+  async function startAudioCapture() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioContext = new AudioContext();
+      const source = audioContext.createMediaStreamSource(stream);
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+
+      processor.onaudioprocess = (e) => {
+        const input = e.inputBuffer.getChannelData(0);
+        // Convert Float32Array to Int16 PCM
+        const int16Buffer = new Int16Array(input.length);
+        for (let i = 0; i < input.length; i++) {
+          int16Buffer[i] = input[i] * 0x7FFF;
+        }
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          // Send raw PCM + userId header as binary
+          const header = new TextEncoder().encode(userId + ':');
+          const combined = new Uint8Array(header.length + int16Buffer.byteLength);
+          combined.set(header, 0);
+          combined.set(new Uint8Array(int16Buffer.buffer), header.length);
+          ws.send(combined.buffer);
+        }
+      };
+
+      logStatus('Mic access granted, streaming audio...');
+    } catch (e) {
+      logStatus('Mic access denied or error occurred.');
     }
+  }
 
-    async function initSocketConnection() {
-      const urlInput = document.getElementById("wssUrl").value;
-      const url = urlInput || 'wss://vc-test.onrender.com';
-      socket = io(url);
+  async function decodeAudioData(arrayBuffer) {
+    if (!audioContext) audioContext = new AudioContext();
+    // skip userId header for playback, expecting userId + ':'
+    // but here just decode entire buffer as PCM, so a simple decode
+    return audioContext.decodeAudioData(arrayBuffer).catch(() => null);
+  }
 
-      socket.on("connect", () => console.log("Connected to server"));
-
-      socket.on("user-joined", async ({ userId }) => {
-        console.log("User joined:", userId);
-        if (!localStream) {
-          console.warn("Local media not ready when user joined.");
-          return;
-        }
-
-        if (peerConnections[userId]) return;
-
-        const pc = createPeerConnection(userId);
-        peerConnections[userId] = pc;
-
-        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        socket.emit("offer", { to: userId, offer });
-      });
-
-      socket.on("offer", async ({ from, offer }) => {
-        console.log("Received offer from", from);
-        if (!localStream) {
-          console.warn("Local media not ready when offer received.");
-          return;
-        }
-
-        const pc = createPeerConnection(from);
-        peerConnections[from] = pc;
-        await pc.setRemoteDescription(new RTCSessionDescription(offer));
-        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        socket.emit("answer", { to: from, answer });
-      });
-
-      socket.on("answer", async ({ from, answer }) => {
-  try {
-    const pc = peerConnections[from];
-    if (!pc) return;
-
-    // Only set remote description if signalingState is not stable
-    if (pc.signalingState !== "stable") {
-      await pc.setRemoteDescription(new RTCSessionDescription(answer));
-      console.log(`Set remote answer from ${from}`);
+  function playAudioStream(buffer, fromUserId) {
+    if (!buffer) return;
+    if (peerStreams.has(fromUserId)) {
+      // update existing source
+      const audio = peerStreams.get(fromUserId);
+      // ... for simplicity we just play multiple streams
+      audio.src = URL.createObjectURL(new Blob([buffer]));
+      audio.play();
     } else {
-      console.warn(`Skipped setting remote answer from ${from} because signalingState is stable`);
+      // create new audio element
+      const audio = new Audio();
+      audio.autoplay = true;
+      audio.controls = true;
+      audio.src = URL.createObjectURL(new Blob([buffer]));
+      const container = document.createElement('div');
+      container.className = 'audio-container';
+      container.textContent = `User ${fromUserId}: `;
+      container.appendChild(audio);
+      audioStreamsDiv.appendChild(container);
+      peerStreams.set(fromUserId, audio);
     }
-  } catch (err) {
-    console.error("Error setting remote answer:", err);
   }
-});
 
-
-      socket.on("ice-candidate", ({ from, candidate }) => {
-        console.log("Received ICE candidate from", from);
-        peerConnections[from]?.addIceCandidate(new RTCIceCandidate(candidate));
-      });
-
-      socket.on("peers", async ({ peers }) => {
-  for (const userId of peers) {
-    const pc = createPeerConnection(userId);
-    peerConnections[userId] = pc;
-
-    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    socket.emit("offer", { to: userId, offer });
+  function removeAudioStream(userId) {
+    if (peerStreams.has(userId)) {
+      const audio = peerStreams.get(userId);
+      audio.pause();
+      audio.remove();
+      peerStreams.delete(userId);
+    }
   }
-});
-
-
-      socket.on("user-left", ({ userId }) => {
-        console.log("User left:", userId);
-        if (peerConnections[userId]) {
-          peerConnections[userId].close();
-          delete peerConnections[userId];
-        }
-      });
-    }
-
-    function createPeerConnection(userId) {
-      const pc = new RTCPeerConnection(servers);
-
-      pc.onicecandidate = e => {
-        if (e.candidate) {
-          socket.emit("ice-candidate", { to: userId, candidate: e.candidate });
-        }
-      };
-
-      pc.ontrack = event => {
-        console.log(`[${userId}] Receiving track:`, event.track.kind);
-        let audio = document.getElementById("audio-" + userId);
-        if (!audio) {
-          audio = document.createElement("audio");
-          audio.id = "audio-" + userId;
-          audio.autoplay = true;
-          document.body.appendChild(audio);
-        }
-        audio.srcObject = event.streams[0];
-      };
-
-      return pc;
-    }
-
-    async function createRoom() {
-      await getMedia();
-      await initSocketConnection();
-      const roomCode = Math.random().toString(36).substr(2, 6).toUpperCase();
-      document.getElementById("roomCodeDisplay").textContent = "Room Code: " + roomCode;
-      socket.emit("create", roomCode);
-      socket.emit("ready", roomCode);
-    }
-
-    async function joinRoom() {
-      await getMedia();
-      await initSocketConnection();
-      const roomCode = document.getElementById("roomCodeInput").value.toUpperCase();
-      socket.emit("join", roomCode);
-      socket.emit("ready", roomCode);
-    }
-  </script>
+</script>
 </body>
 </html>
