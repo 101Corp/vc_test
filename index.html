@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Group Voice Chat</title>
+</head>
+<body>
+  <h1>Group Voice Chat</h1>
+
+  <input id="wssUrl" placeholder="Enter WSS URL (optional)" />
+  <br><br>
+  <button onclick="createRoom()">Create</button>
+  <button onclick="joinRoom()">Join</button>
+  <input id="roomCodeInput" placeholder="Enter room code..." />
+  <p id="roomCodeDisplay"></p>
+
+  <script>
+    let socket;
+    let peerConnections = {}; // key: socket id, value: RTCPeerConnection
+    let localStream;
+    const servers = {
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    };
+
+    async function initSocketConnection() {
+      const url = document.getElementById("wssUrl").value || location.origin.replace(/^http/, 'ws');
+      socket = io(url);
+
+      socket.on("user-joined", async ({ userId }) => {
+        const pc = createPeerConnection(userId);
+        peerConnections[userId] = pc;
+
+        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit("offer", { to: userId, offer });
+      });
+
+      socket.on("offer", async ({ from, offer }) => {
+        const pc = createPeerConnection(from);
+        peerConnections[from] = pc;
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.emit("answer", { to: from, answer });
+      });
+
+      socket.on("answer", async ({ from, answer }) => {
+        await peerConnections[from].setRemoteDescription(new RTCSessionDescription(answer));
+      });
+
+      socket.on("ice-candidate", ({ from, candidate }) => {
+        peerConnections[from]?.addIceCandidate(new RTCIceCandidate(candidate));
+      });
+
+      socket.on("user-left", ({ userId }) => {
+        if (peerConnections[userId]) {
+          peerConnections[userId].close();
+          delete peerConnections[userId];
+        }
+      });
+
+      socket.on("connect", () => console.log("Connected to server"));
+    }
+
+    function createPeerConnection(userId) {
+      const pc = new RTCPeerConnection(servers);
+
+      pc.onicecandidate = e => {
+        if (e.candidate) {
+          socket.emit("ice-candidate", { to: userId, candidate: e.candidate });
+        }
+      };
+
+      pc.ontrack = event => {
+        let audio = document.getElementById("audio-" + userId);
+        if (!audio) {
+          audio = document.createElement("audio");
+          audio.id = "audio-" + userId;
+          audio.autoplay = true;
+          audio.srcObject = event.streams[0];
+          document.body.appendChild(audio);
+        }
+      };
+
+      return pc;
+    }
+
+    async function createRoom() {
+      await initSocketConnection();
+      const roomCode = Math.random().toString(36).substr(2, 6).toUpperCase();
+      document.getElementById("roomCodeDisplay").textContent = "Room Code: " + roomCode;
+      socket.emit("create", roomCode);
+      await getMedia();
+      socket.emit("ready", roomCode);
+    }
+
+    async function joinRoom() {
+      await initSocketConnection();
+      const roomCode = document.getElementById("roomCodeInput").value.toUpperCase();
+      socket.emit("join", roomCode);
+      await getMedia();
+      socket.emit("ready", roomCode);
+    }
+
+    async function getMedia() {
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    }
+  </script>
+
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"
+    integrity="sha384-9SfN9j9qd2kaMAlh5m0jK9cPBAVPFIm6Dg/nLxSKV0rZJ13cT8f7NqRUlYMIvPOc"
+    crossorigin="anonymous"></script>
+</body>
+</html>
