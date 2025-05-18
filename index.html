@@ -19,13 +19,8 @@
 
   <script>
     let socket;
-    let peerConnections = {}; // { [userId]: RTCPeerConnection }
-    let negotiationLocks = {}; // { [userId]: boolean }
+    let peerConnections = {};
     let localStream;
-
-    const servers = {
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-    };
 
     async function initSocketConnection() {
       const url = document.getElementById("wssUrl").value || location.origin.replace(/^http/, 'ws');
@@ -37,37 +32,28 @@
         console.log(`[${userId}] joined`);
         if (peerConnections[userId]) return;
 
-        const pc = createPeerConnection(userId);
+        const polite = false; // you're the one joining, you're impolite
+        const pc = createPeerConnection(userId, polite);
         peerConnections[userId] = pc;
-
-        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-
-        try {
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          socket.emit("offer", { to: userId, offer });
-        } catch (err) {
-          console.error(`[${userId}] Error creating offer:`, err);
-        }
       });
 
       socket.on("offer", async ({ from, offer }) => {
-        console.log(`[${from}] received offer`);
-
         let pc = peerConnections[from];
         if (!pc) {
-          pc = createPeerConnection(from);
+          // You're polite because you didn't initiate
+          pc = createPeerConnection(from, true);
           peerConnections[from] = pc;
         }
 
-        if (pc.signalingState !== "stable") {
-          console.warn(`[${from}] Skipping offer: signaling state is ${pc.signalingState}`);
+        const isCollision = pc.makingOffer || pc.signalingState !== "stable";
+
+        if (isCollision && !pc.polite) {
+          console.warn(`[${from}] Ignoring offer due to collision`);
           return;
         }
 
         try {
           await pc.setRemoteDescription(new RTCSessionDescription(offer));
-          localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
           socket.emit("answer", { to: from, answer });
@@ -82,7 +68,7 @@
         try {
           await pc.setRemoteDescription(new RTCSessionDescription(answer));
         } catch (err) {
-          console.error(`[${from}] Error setting remote answer:`, err);
+          console.error(`[${from}] Error setting answer:`, err);
         }
       });
 
@@ -90,7 +76,7 @@
         const pc = peerConnections[from];
         if (pc && candidate) {
           pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(err => {
-            console.error(`[${from}] Error adding ICE candidate:`, err);
+            console.error(`[${from}] Error adding ICE:`, err);
           });
         }
       });
@@ -105,13 +91,32 @@
       });
     }
 
-    function createPeerConnection(userId) {
-      const pc = new RTCPeerConnection(servers);
-      negotiationLocks[userId] = false;
+    function createPeerConnection(userId, polite) {
+      const pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      });
+
+      pc.polite = polite;
+      pc.makingOffer = false;
+
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
       pc.onicecandidate = e => {
         if (e.candidate) {
           socket.emit("ice-candidate", { to: userId, candidate: e.candidate });
+        }
+      };
+
+      pc.onnegotiationneeded = async () => {
+        try {
+          pc.makingOffer = true;
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          socket.emit("offer", { to: userId, offer });
+        } catch (err) {
+          console.error(`[${userId}] Negotiation error:`, err);
+        } finally {
+          pc.makingOffer = false;
         }
       };
 
@@ -124,20 +129,6 @@
           document.body.appendChild(audio);
         }
         audio.srcObject = event.streams[0];
-      };
-
-      pc.onnegotiationneeded = async () => {
-        if (negotiationLocks[userId]) return;
-        negotiationLocks[userId] = true;
-        try {
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          socket.emit("offer", { to: userId, offer });
-        } catch (err) {
-          console.error(`[${userId}] Negotiation error:`, err);
-        } finally {
-          negotiationLocks[userId] = false;
-        }
       };
 
       return pc;
