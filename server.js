@@ -29,15 +29,23 @@ io.on('connection', socket => {
     rooms[roomCode].push(socket.id);
   });
 
-  socket.on('ready', roomCode => {
-    const peers = rooms[roomCode] || [];
-    peers.forEach(peerId => {
-      if (peerId !== socket.id) {
-        io.to(peerId).emit("user-joined", { userId: socket.id });
-        socket.emit("user-joined", { userId: peerId });
-      }
-    });
+ socket.on('ready', roomCode => {
+  const peers = rooms[roomCode] || [];
+
+  // Send new user's ID to existing peers (so THEY create an offer)
+  peers.forEach(peerId => {
+    if (peerId !== socket.id) {
+      io.to(peerId).emit("user-joined", { userId: socket.id });
+    }
   });
+
+  // Send existing peers' IDs to the new user (so they only respond)
+  const otherPeers = peers.filter(id => id !== socket.id);
+  if (otherPeers.length > 0) {
+    socket.emit("peers", { peers: otherPeers });
+  }
+});
+
 
   socket.on("offer", ({ to, offer }) => {
     io.to(to).emit("offer", { from: socket.id, offer });
